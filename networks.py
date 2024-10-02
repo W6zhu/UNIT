@@ -255,7 +255,6 @@ class ResBlocks(nn.Module):
 
 class MLP(nn.Module):
     def __init__(self, input_dim, output_dim, dim, n_blk, norm='none', activ='relu'):
-
         super(MLP, self).__init__()
         self.model = []
         self.model += [LinearBlock(input_dim, dim, norm=norm, activation=activ)]
@@ -270,6 +269,7 @@ class MLP(nn.Module):
 ##################################################################################
 # Basic Blocks
 ##################################################################################
+
 class ResBlock(nn.Module):
     def __init__(self, dim, norm='in', activation='relu', pad_type='zero'):
         super(ResBlock, self).__init__()
@@ -343,6 +343,7 @@ class Conv2dBlock(nn.Module):
             x = self.activation(x)
         return x
 
+    
 class LinearBlock(nn.Module):
     def __init__(self, input_dim, output_dim, norm='none', activation='relu'):
         super(LinearBlock, self).__init__()

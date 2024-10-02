@@ -2,8 +2,7 @@
 Copyright (C) 2018 NVIDIA Corporation.  All rights reserved.
 Licensed under the CC BY-NC-SA 4.0 license (https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode).
 """
-from torch.utils.serialization import load_lua
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from networks import Vgg16
 from torch.autograd import Variable
 from torch.optim import lr_scheduler
@@ -17,6 +16,13 @@ import yaml
 import numpy as np
 import torch.nn.init as init
 import time
+import nibabel as nib
+import glob
+import torch.nn.functional as F  # Added import for functional operations (for resizing 3D tensors)
+from PIL import Image
+import matplotlib.pyplot as plt
+
+
 # Methods
 # get_all_data_loaders      : primary data loader interface (load trainA, testA, trainB, testB)
 # get_data_loader_list      : list-based data loader
@@ -36,35 +42,74 @@ import time
 # get_scheduler
 # weights_init
 
-def get_all_data_loaders(conf):
-    batch_size = conf['batch_size']
-    num_workers = conf['num_workers']
-    if 'new_size' in conf:
-        new_size_a = new_size_b = conf['new_size']
-    else:
-        new_size_a = conf['new_size_a']
-        new_size_b = conf['new_size_b']
-    height = conf['crop_image_height']
-    width = conf['crop_image_width']
+def collate_resize(batch):
+    batch_resized = []
+    
+    for volume in batch:  # Iterate through each 3D volume in the batch
+        slices = []
+        # Iterate over the depth dimension to get individual 2D slices
+        for i in range(volume.shape[1]):  # Assuming volume shape is (C, D, H, W)
+            slice_2d = volume[:, i, :, :]  # Extract a 2D slice from the volume (C, H, W)
+            resize_transform = transforms.Resize((128, 128))  # Resize the 2D slice
+            slice_resized = resize_transform(slice_2d)
+            slices.append(slice_resized)
+        
+        # Stack all resized slices for the current volume and add to batch
+        batch_resized.extend(slices)  # Flatten to remove the depth dimension
+    
+    # Stack into 4D batch (B, C, H, W) and ensure correct shape for Conv2D
+    return torch.stack(batch_resized)
 
-    if 'data_root' in conf:
-        train_loader_a = get_data_loader_folder(os.path.join(conf['data_root'], 'trainA'), batch_size, True,
-                                              new_size_a, height, width, num_workers, True)
-        test_loader_a = get_data_loader_folder(os.path.join(conf['data_root'], 'testA'), batch_size, False,
-                                             new_size_a, new_size_a, new_size_a, num_workers, True)
-        train_loader_b = get_data_loader_folder(os.path.join(conf['data_root'], 'trainB'), batch_size, True,
-                                              new_size_b, height, width, num_workers, True)
-        test_loader_b = get_data_loader_folder(os.path.join(conf['data_root'], 'testB'), batch_size, False,
-                                             new_size_b, new_size_b, new_size_b, num_workers, True)
-    else:
-        train_loader_a = get_data_loader_list(conf['data_folder_train_a'], conf['data_list_train_a'], batch_size, True,
-                                                new_size_a, height, width, num_workers, True)
-        test_loader_a = get_data_loader_list(conf['data_folder_test_a'], conf['data_list_test_a'], batch_size, False,
-                                                new_size_a, new_size_a, new_size_a, num_workers, True)
-        train_loader_b = get_data_loader_list(conf['data_folder_train_b'], conf['data_list_train_b'], batch_size, True,
-                                                new_size_b, height, width, num_workers, True)
-        test_loader_b = get_data_loader_list(conf['data_folder_test_b'], conf['data_list_test_b'], batch_size, False,
-                                                new_size_b, new_size_b, new_size_b, num_workers, True)
+
+
+# Add this function to load NII files with 3D transforms
+def load_nii_volume(file_path):
+    """Load and return a 3D NII volume as a tensor, cast to float32."""
+    nii_img = nib.load(file_path)
+    volume = torch.tensor(nii_img.get_fdata(), dtype=torch.float32)  # Convert to a float32 tensor
+    return volume
+
+
+def slice_nii_volume_to_2d(volume):
+    """Slice a 3D NII volume into a list of 2D slices."""
+    slices = []
+    for i in range(volume.shape[2]):  # Assuming shape is (H, W, D)
+        slice_2d = volume[:, :, i]  # Extract 2D slice along the depth dimension
+        slice_2d = torch.unsqueeze(torch.unsqueeze(slice_2d, 0), 0)  # Add batch and channel dimensions
+        slices.append(slice_2d)
+    return slices
+
+def nii_dataset_loader(data_root, folder_name):
+    """Loads a dataset of NII files, slices them into 2D images."""
+    folder_path = os.path.join(data_root, folder_name)
+    nii_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith('.nii') or f.endswith('.nii.gz')]
+
+    dataset_slices = []
+    for nii_file in nii_files:
+        volume = load_nii_volume(nii_file)  # Load the NII file
+        slices = slice_nii_volume_to_2d(volume)  # Convert it to 2D slices
+        dataset_slices.extend(slices)  # Add all 2D slices to the dataset
+
+    return dataset_slices
+
+def get_all_data_loaders(config):
+    # Check if the data root directory exists
+    data_root = config.get("data_root", None)
+    if not data_root or not os.path.exists(data_root):
+        raise FileNotFoundError(f"The specified data_root path '{data_root}' does not exist. Please check your path.")
+
+    # Paths for the train and test sets
+    trainA_slices = nii_dataset_loader(data_root, 'trainA')
+    trainB_slices = nii_dataset_loader(data_root, 'trainB')
+    testA_slices = nii_dataset_loader(data_root, 'testA')
+    testB_slices = nii_dataset_loader(data_root, 'testB')
+
+    # Create data loaders
+    train_loader_a = torch.utils.data.DataLoader(trainA_slices, batch_size=config['batch_size'], shuffle=True, num_workers=config['num_workers'])
+    test_loader_a = torch.utils.data.DataLoader(testA_slices, batch_size=config['batch_size'], shuffle=False, num_workers=config['num_workers'])
+    train_loader_b = torch.utils.data.DataLoader(trainB_slices, batch_size=config['batch_size'], shuffle=True, num_workers=config['num_workers'])
+    test_loader_b = torch.utils.data.DataLoader(testB_slices, batch_size=config['batch_size'], shuffle=False, num_workers=config['num_workers'])
+
     return train_loader_a, train_loader_b, test_loader_a, test_loader_b
 
 
@@ -97,7 +142,7 @@ def get_data_loader_folder(input_folder, batch_size, train, new_size=None,
 
 def get_config(config):
     with open(config, 'r') as stream:
-        return yaml.load(stream)
+        return yaml.load(stream, Loader=yaml.FullLoader)
 
 
 def eformat(f, prec):
@@ -107,17 +152,102 @@ def eformat(f, prec):
     return "%se%d"%(mantissa, int(exp))
 
 
-def __write_images(image_outputs, display_image_num, file_name):
-    image_outputs = [images.expand(-1, 3, -1, -1) for images in image_outputs] # expand gray-scale images to 3 channels
-    image_tensor = torch.cat([images[:display_image_num] for images in image_outputs], 0)
-    image_grid = vutils.make_grid(image_tensor.data, nrow=display_image_num, padding=0, normalize=True)
-    vutils.save_image(image_grid, file_name, nrow=1)
 
+def save_slice(slice_array, file_name, rows, cols):
+    """Save slices from a 3D array into a grid and save as a PNG image."""
+    fig, axs = plt.subplots(rows, cols, figsize=(cols * 2, rows * 2))
+    axs = axs.flatten()
+
+    for i, slice_img in enumerate(slice_array):
+        # Move the tensor to CPU and convert to NumPy array
+        if slice_img.is_cuda:
+            slice_img = slice_img.cpu()
+        slice_img = slice_img.numpy()
+
+        # Debugging: print slice shape and range
+        print(f"Slice {i} shape before processing: {slice_img.shape}")
+        print(f"Slice {i} min: {slice_img.min()}, max: {slice_img.max()}")
+
+        # Handle different shapes
+        if slice_img.ndim == 4:
+            slice_img = slice_img[0]  # Take the first image in the batch
+        if slice_img.ndim == 3:
+            slice_img = slice_img[0]  # Take the first channel
+        if slice_img.ndim == 2:
+            pass  # No change needed
+
+        axs[i].imshow(slice_img, cmap='gray')
+        axs[i].axis('off')
+
+    # Hide any unused subplots
+    for j in range(i + 1, len(axs)):
+        axs[j].axis('off')
+
+    plt.tight_layout()
+    plt.savefig(file_name, bbox_inches='tight', pad_inches=0)
+    plt.close()
+
+def normalize_image(tensor):
+    """Normalize a tensor image to [0, 1] range."""
+    tensor = (tensor - tensor.min()) / (tensor.max() - tensor.min() + 1e-5)  # Normalize to [0, 1]
+    return tensor
+
+def __write_images(image_outputs, display_image_num, file_name):
+    # Log the function call
+    print(f"__write_images called with file_name: {file_name}")
+
+    processed_images = []
+    
+    for images in image_outputs:
+        # Handle 5D tensors with depth=1
+        if images.dim() == 5 and images.shape[2] == 1:  # Check if it's a 5D tensor with depth=1
+            images = images.squeeze(2)
+
+        # Process 4D tensors (N, C, H, W)
+        if images.dim() == 4:
+            # Normalize and expand grayscale images to 3 channels if needed
+            images = normalize_image(images)
+            images = images.expand(-1, 3, -1, -1)  # Expand grayscale images to 3 channels
+            processed_images.append(images)
+        else:
+            print(f"Skipping image with shape {images.shape}, expected 4D tensor.")
+
+    # Concatenate the images if they are properly processed into 4D
+    if len(processed_images) > 0:
+        image_tensor = torch.cat([img[:display_image_num] for img in processed_images], 0)
+        image_grid = vutils.make_grid(image_tensor.data, nrow=display_image_num, padding=0, normalize=False)
+    
+        # Add try-except to log errors during saving
+        try:
+            print(f"Attempting to save images to {file_name}")
+            vutils.save_image(image_grid, file_name, nrow=1)  # Save as PNG
+            print(f"Image saved successfully at: {file_name}")
+        except Exception as e:
+            print(f"Error while saving image to {file_name}: {e}")
+    else:
+        print(f"No valid 4D images to save for file {file_name}.")
 
 def write_2images(image_outputs, display_image_num, image_directory, postfix):
     n = len(image_outputs)
-    __write_images(image_outputs[0:n//2], display_image_num, '%s/gen_a2b_%s.jpg' % (image_directory, postfix))
-    __write_images(image_outputs[n//2:n], display_image_num, '%s/gen_b2a_%s.jpg' % (image_directory, postfix))
+
+    file_a2b = f'{image_directory}/gen_a2b_{postfix}.png'
+    file_b2a = f'{image_directory}/gen_b2a_{postfix}.png'
+
+    # Log file paths and the size of images
+    print(f"Saving gen_a2b image to: {file_a2b} (image shape: {image_outputs[0].shape})")
+    print(f"Saving gen_b2a image to: {file_b2a} (image shape: {image_outputs[n//2].shape})")
+
+    # Try saving images and catch errors
+    try:
+        __write_images(image_outputs[0:n//2], display_image_num, file_a2b)  # Save gen_a2b
+    except Exception as e:
+        print(f"Error while saving gen_a2b images: {e}")
+
+    try:
+        __write_images(image_outputs[n//2:n], display_image_num, file_b2a)  # Save gen_b2a
+    except Exception as e:
+        print(f"Error while saving gen_b2a images: {e}")
+
 
 
 def prepare_sub_folder(output_directory):
@@ -205,45 +335,83 @@ def get_slerp_interp(nb_latents, nb_interp, z_dim):
 
 # Get model list for resume
 def get_model_list(dirname, key):
-    if os.path.exists(dirname) is False:
+    if not os.path.exists(dirname):
         return None
     gen_models = [os.path.join(dirname, f) for f in os.listdir(dirname) if
                   os.path.isfile(os.path.join(dirname, f)) and key in f and ".pt" in f]
-    if gen_models is None:
+    if not gen_models:
         return None
     gen_models.sort()
     last_model_name = gen_models[-1]
     return last_model_name
 
 
+import torchvision.models as models
+
 def load_vgg16(model_dir):
-    """ Use the model from https://github.com/abhiskk/fast-neural-style/blob/master/neural_style/utils.py """
+    """Load a pre-trained VGG16 model from torchvision"""
     if not os.path.exists(model_dir):
-        os.mkdir(model_dir)
-    if not os.path.exists(os.path.join(model_dir, 'vgg16.weight')):
-        if not os.path.exists(os.path.join(model_dir, 'vgg16.t7')):
-            os.system('wget https://www.dropbox.com/s/76l3rt4kyi3s8x7/vgg16.t7?dl=1 -O ' + os.path.join(model_dir, 'vgg16.t7'))
-        vgglua = load_lua(os.path.join(model_dir, 'vgg16.t7'))
-        vgg = Vgg16()
-        for (src, dst) in zip(vgglua.parameters()[0], vgg.parameters()):
-            dst.data[:] = src
-        torch.save(vgg.state_dict(), os.path.join(model_dir, 'vgg16.weight'))
-    vgg = Vgg16()
-    vgg.load_state_dict(torch.load(os.path.join(model_dir, 'vgg16.weight')))
-    return vgg
+        os.makedirs(model_dir)
+    
+    # Define the path for saving and loading the model weights
+    weights_path = os.path.join(model_dir, 'vgg16.pth')
+    
+    # Check if the weights are already downloaded
+    if not os.path.exists(weights_path):
+        print(f"Downloading pre-trained VGG16 model weights to {weights_path}")
+        
+        # Download the model weights from torchvision
+        vgg16 = models.vgg16(pretrained=True)
+        
+        # Save the model weights to the specified path
+        torch.save(vgg16.state_dict(), weights_path)
+    else:
+        print(f"Loading pre-trained VGG16 model weights from {weights_path}")
+    
+    # Create a new VGG16 model
+    vgg16 = models.vgg16()
+    
+    # Load the weights into the model
+    vgg16.load_state_dict(torch.load(weights_path))
+    
+    return vgg16
 
 
 def vgg_preprocess(batch):
     tensortype = type(batch.data)
-    (r, g, b) = torch.chunk(batch, 3, dim = 1)
-    batch = torch.cat((b, g, r), dim = 1) # convert RGB to BGR
-    batch = (batch + 1) * 255 * 0.5 # [-1, 1] -> [0, 255]
-    mean = tensortype(batch.data.size()).cuda()
-    mean[:, 0, :, :] = 103.939
-    mean[:, 1, :, :] = 116.779
-    mean[:, 2, :, :] = 123.680
-    batch = batch.sub(Variable(mean)) # subtract mean
-    return batch
+
+    # Check if input is 5D (batch, channel, depth, height, width) - for 3D volumes
+    if batch.dim() == 5:
+        # Assuming the depth is the 3rd dimension, we take 2D slices along the depth axis
+        depth_slices = torch.unbind(batch, dim=2)  # Unbind along depth axis, returns a list of 2D slices
+        batch_slices = torch.cat(depth_slices, dim=0)  # Stack the slices along the batch dimension
+    else:
+        batch_slices = batch
+
+    # If input is grayscale (1 channel), replicate it across 3 channels
+    if batch_slices.size(1) == 1:
+        batch_slices = batch_slices.repeat(1, 3, 1, 1)  # Replicate grayscale channel to simulate RGB
+
+    # Now the input has 3 channels (RGB-like), we proceed with preprocessing
+    (r, g, b) = torch.chunk(batch_slices, 3, dim=1)  # Split into R, G, B channels
+
+    # Convert from RGB to BGR (as expected by VGG)
+    batch_slices = torch.cat((b, g, r), dim=1)
+
+    # Scale pixel values from [-1, 1] -> [0, 255]
+    batch_slices = (batch_slices + 1) * 255 * 0.5
+
+    # Create a mean tensor to subtract from the image (VGG specific mean values for BGR)
+    mean = tensortype(batch_slices.data.size()).cuda()
+    mean[:, 0, :, :] = 103.939  # For B channel
+    mean[:, 1, :, :] = 116.779  # For G channel
+    mean[:, 2, :, :] = 123.680  # For R channel
+
+    # Subtract the mean
+    batch_slices = batch_slices.sub(Variable(mean))
+
+    return batch_slices
+
 
 
 def get_scheduler(optimizer, hyperparameters, iterations=-1):
@@ -253,7 +421,7 @@ def get_scheduler(optimizer, hyperparameters, iterations=-1):
         scheduler = lr_scheduler.StepLR(optimizer, step_size=hyperparameters['step_size'],
                                         gamma=hyperparameters['gamma'], last_epoch=iterations)
     else:
-        return NotImplementedError('learning rate policy [%s] is not implemented', hyperparameters['lr_policy'])
+        raise NotImplementedError('learning rate policy [%s] is not implemented' % hyperparameters['lr_policy'])
     return scheduler
 
 
@@ -261,7 +429,6 @@ def weights_init(init_type='gaussian'):
     def init_fun(m):
         classname = m.__class__.__name__
         if (classname.find('Conv') == 0 or classname.find('Linear') == 0) and hasattr(m, 'weight'):
-            # print m.__class__.__name__
             if init_type == 'gaussian':
                 init.normal_(m.weight.data, 0.0, 0.02)
             elif init_type == 'xavier':
@@ -273,7 +440,7 @@ def weights_init(init_type='gaussian'):
             elif init_type == 'default':
                 pass
             else:
-                assert 0, "Unsupported initialization: {}".format(init_type)
+                raise ValueError("Unsupported initialization: {}".format(init_type))
             if hasattr(m, 'bias') and m.bias is not None:
                 init.constant_(m.bias.data, 0.0)
 
@@ -341,3 +508,4 @@ def pytorch03_to_pytorch04(state_dict_base):
     state_dict['a'] = __conversion_core(state_dict_base['a'])
     state_dict['b'] = __conversion_core(state_dict_base['b'])
     return state_dict
+

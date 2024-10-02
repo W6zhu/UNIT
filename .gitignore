@@ -14,3 +14,11 @@ src/yaml_generator.py
 *.zip
 *.pkl
 *.pyc
+old test/
+datasets/10_anatomical/
+datasets/10_fatfrac/
+datasets/anata2fatfrac/
+*nii
+unit-env/
+*pth
+*t7

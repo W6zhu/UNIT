@@ -1,13 +1,22 @@
-"""
-Copyright (C) 2017 NVIDIA Corporation.  All rights reserved.
-Licensed under the CC BY-NC-SA 4.0 license (https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode).
-"""
+
+
 from networks import AdaINGen, MsImageDis, VAEGen
 from utils import weights_init, get_model_list, vgg_preprocess, load_vgg16, get_scheduler
 from torch.autograd import Variable
 import torch
 import torch.nn as nn
 import os
+import torchvision.models as models
+
+class VGGFeatureExtractor(nn.Module):
+    def __init__(self):
+        super(VGGFeatureExtractor, self).__init__()
+        vgg = models.vgg16(pretrained=True)
+        # Extract features up to conv4_3 (you can change the layer according to your needs)
+        self.features = nn.Sequential(*list(vgg.features.children())[:23])  # conv4_3 layer
+
+    def forward(self, x):
+        return self.features(x)
 
 class MUNIT_Trainer(nn.Module):
     def __init__(self, hyperparameters):
@@ -18,13 +27,13 @@ class MUNIT_Trainer(nn.Module):
         self.gen_b = AdaINGen(hyperparameters['input_dim_b'], hyperparameters['gen'])  # auto-encoder for domain b
         self.dis_a = MsImageDis(hyperparameters['input_dim_a'], hyperparameters['dis'])  # discriminator for domain a
         self.dis_b = MsImageDis(hyperparameters['input_dim_b'], hyperparameters['dis'])  # discriminator for domain b
-        self.instancenorm = nn.InstanceNorm2d(512, affine=False)
+        self.instancenorm = nn.InstanceNorm2d(512, affine=False)  # Changed to InstanceNorm3d
         self.style_dim = hyperparameters['gen']['style_dim']
 
         # fix the noise used in sampling
         display_size = int(hyperparameters['display_size'])
-        self.s_a = torch.randn(display_size, self.style_dim, 1, 1).cuda()
-        self.s_b = torch.randn(display_size, self.style_dim, 1, 1).cuda()
+        self.s_a = torch.randn(display_size, self.style_dim, 1, 1, 1).cuda()  # Adjusted for 3D
+        self.s_b = torch.randn(display_size, self.style_dim, 1, 1, 1).cuda()  # Adjusted for 3D
 
         # Setup the optimizers
         beta1 = hyperparameters['beta1']
@@ -45,7 +54,7 @@ class MUNIT_Trainer(nn.Module):
 
         # Load VGG model if needed
         if 'vgg_w' in hyperparameters.keys() and hyperparameters['vgg_w'] > 0:
-            self.vgg = load_vgg16(hyperparameters['vgg_model_path'] + '/models')
+            self.vgg = VGGFeatureExtractor().cuda()  # Use the custom VGG feature extractor
             self.vgg.eval()
             for param in self.vgg.parameters():
                 param.requires_grad = False
@@ -66,8 +75,8 @@ class MUNIT_Trainer(nn.Module):
 
     def gen_update(self, x_a, x_b, hyperparameters):
         self.gen_opt.zero_grad()
-        s_a = Variable(torch.randn(x_a.size(0), self.style_dim, 1, 1).cuda())
-        s_b = Variable(torch.randn(x_b.size(0), self.style_dim, 1, 1).cuda())
+        s_a = Variable(torch.randn(x_a.size(0), self.style_dim, 1, 1, 1).cuda())  # Adjusted for 3D
+        s_b = Variable(torch.randn(x_b.size(0), self.style_dim, 1, 1, 1).cuda())  # Adjusted for 3D
         # encode
         c_a, s_a_prime = self.gen_a.encode(x_a)
         c_b, s_b_prime = self.gen_b.encode(x_b)
@@ -116,18 +125,21 @@ class MUNIT_Trainer(nn.Module):
         self.gen_opt.step()
 
     def compute_vgg_loss(self, vgg, img, target):
-        img_vgg = vgg_preprocess(img)
+        img_vgg = vgg_preprocess(img)  # Preprocess images for VGG
         target_vgg = vgg_preprocess(target)
-        img_fea = vgg(img_vgg)
+        
+        img_fea = vgg(img_vgg)  # Extract features from the modified VGG
         target_fea = vgg(target_vgg)
+        
+        # Compute perceptual loss using InstanceNorm on the feature maps
         return torch.mean((self.instancenorm(img_fea) - self.instancenorm(target_fea)) ** 2)
 
     def sample(self, x_a, x_b):
         self.eval()
         s_a1 = Variable(self.s_a)
         s_b1 = Variable(self.s_b)
-        s_a2 = Variable(torch.randn(x_a.size(0), self.style_dim, 1, 1).cuda())
-        s_b2 = Variable(torch.randn(x_b.size(0), self.style_dim, 1, 1).cuda())
+        s_a2 = Variable(torch.randn(x_a.size(0), self.style_dim, 1, 1, 1).cuda())  # Adjusted for 3D
+        s_b2 = Variable(torch.randn(x_b.size(0), self.style_dim, 1, 1, 1).cuda())  # Adjusted for 3D
         x_a_recon, x_b_recon, x_ba1, x_ba2, x_ab1, x_ab2 = [], [], [], [], [], []
         for i in range(x_a.size(0)):
             c_a, s_a_fake = self.gen_a.encode(x_a[i].unsqueeze(0))
@@ -146,8 +158,8 @@ class MUNIT_Trainer(nn.Module):
 
     def dis_update(self, x_a, x_b, hyperparameters):
         self.dis_opt.zero_grad()
-        s_a = Variable(torch.randn(x_a.size(0), self.style_dim, 1, 1).cuda())
-        s_b = Variable(torch.randn(x_b.size(0), self.style_dim, 1, 1).cuda())
+        s_a = Variable(torch.randn(x_a.size(0), self.style_dim, 1, 1, 1).cuda())  # Adjusted for 3D
+        s_b = Variable(torch.randn(x_b.size(0), self.style_dim, 1, 1, 1).cuda())  # Adjusted for 3D
         # encode
         c_a, _ = self.gen_a.encode(x_a)
         c_b, _ = self.gen_b.encode(x_b)
@@ -208,7 +220,7 @@ class UNIT_Trainer(nn.Module):
         self.gen_b = VAEGen(hyperparameters['input_dim_b'], hyperparameters['gen'])  # auto-encoder for domain b
         self.dis_a = MsImageDis(hyperparameters['input_dim_a'], hyperparameters['dis'])  # discriminator for domain a
         self.dis_b = MsImageDis(hyperparameters['input_dim_b'], hyperparameters['dis'])  # discriminator for domain b
-        self.instancenorm = nn.InstanceNorm2d(512, affine=False)
+        self.instancenorm = nn.InstanceNorm3d(512, affine=False)  # Changed to InstanceNorm3d
 
         # Setup the optimizers
         beta1 = hyperparameters['beta1']
@@ -229,7 +241,7 @@ class UNIT_Trainer(nn.Module):
 
         # Load VGG model if needed
         if 'vgg_w' in hyperparameters.keys() and hyperparameters['vgg_w'] > 0:
-            self.vgg = load_vgg16(hyperparameters['vgg_model_path'] + '/models')
+            self.vgg = VGGFeatureExtractor().cuda()  # Custom VGG feature extractor
             self.vgg.eval()
             for param in self.vgg.parameters():
                 param.requires_grad = False
@@ -247,63 +259,95 @@ class UNIT_Trainer(nn.Module):
         return x_ab, x_ba
 
     def __compute_kl(self, mu):
-        # def _compute_kl(self, mu, sd):
-        # mu_2 = torch.pow(mu, 2)
-        # sd_2 = torch.pow(sd, 2)
-        # encoding_loss = (mu_2 + sd_2 - torch.log(sd_2)).sum() / mu_2.size(0)
-        # return encoding_loss
         mu_2 = torch.pow(mu, 2)
         encoding_loss = torch.mean(mu_2)
         return encoding_loss
-
+    
     def gen_update(self, x_a, x_b, hyperparameters):
         self.gen_opt.zero_grad()
-        # encode
+        
+        # Encode
         h_a, n_a = self.gen_a.encode(x_a)
         h_b, n_b = self.gen_b.encode(x_b)
-        # decode (within domain)
+        
+        # Decode (within domain)
         x_a_recon = self.gen_a.decode(h_a + n_a)
         x_b_recon = self.gen_b.decode(h_b + n_b)
-        # decode (cross domain)
+        
+        # Decode (cross domain)
         x_ba = self.gen_a.decode(h_b + n_b)
         x_ab = self.gen_b.decode(h_a + n_a)
-        # encode again
+        
+        # Encode again
         h_b_recon, n_b_recon = self.gen_a.encode(x_ba)
         h_a_recon, n_a_recon = self.gen_b.encode(x_ab)
-        # decode again (if needed)
+        
+        # Decode again (if needed)
         x_aba = self.gen_a.decode(h_a_recon + n_a_recon) if hyperparameters['recon_x_cyc_w'] > 0 else None
         x_bab = self.gen_b.decode(h_b_recon + n_b_recon) if hyperparameters['recon_x_cyc_w'] > 0 else None
 
-        # reconstruction loss
+        # **Normalization Fix**: Clamp reconstructed images to ensure values are within [-1, 1] or [0, 1]
+        x_a_recon = torch.clamp(x_a_recon, min=-1, max=1)
+        x_b_recon = torch.clamp(x_b_recon, min=-1, max=1)
+        x_ba = torch.clamp(x_ba, min=-1, max=1)
+        x_ab = torch.clamp(x_ab, min=-1, max=1)
+        
+        if x_aba is not None:
+            x_aba = torch.clamp(x_aba, min=-1, max=1)
+        if x_bab is not None:
+            x_bab = torch.clamp(x_bab, min=-1, max=1)
+
+        # Reconstruction loss
         self.loss_gen_recon_x_a = self.recon_criterion(x_a_recon, x_a)
         self.loss_gen_recon_x_b = self.recon_criterion(x_b_recon, x_b)
         self.loss_gen_recon_kl_a = self.__compute_kl(h_a)
         self.loss_gen_recon_kl_b = self.__compute_kl(h_b)
-        self.loss_gen_cyc_x_a = self.recon_criterion(x_aba, x_a)
-        self.loss_gen_cyc_x_b = self.recon_criterion(x_bab, x_b)
-        self.loss_gen_recon_kl_cyc_aba = self.__compute_kl(h_a_recon)
-        self.loss_gen_recon_kl_cyc_bab = self.__compute_kl(h_b_recon)
+        self.loss_gen_cyc_x_a = self.recon_criterion(x_aba, x_a) if x_aba is not None else 0
+        self.loss_gen_cyc_x_b = self.recon_criterion(x_bab, x_b) if x_bab is not None else 0
+        self.loss_gen_recon_kl_cyc_aba = self.__compute_kl(h_a_recon) if h_a_recon is not None else 0
+        self.loss_gen_recon_kl_cyc_bab = self.__compute_kl(h_b_recon) if h_b_recon is not None else 0
+        
         # GAN loss
         self.loss_gen_adv_a = self.dis_a.calc_gen_loss(x_ba)
         self.loss_gen_adv_b = self.dis_b.calc_gen_loss(x_ab)
-        # domain-invariant perceptual loss
+        
+        # Domain-invariant perceptual loss
         self.loss_gen_vgg_a = self.compute_vgg_loss(self.vgg, x_ba, x_b) if hyperparameters['vgg_w'] > 0 else 0
         self.loss_gen_vgg_b = self.compute_vgg_loss(self.vgg, x_ab, x_a) if hyperparameters['vgg_w'] > 0 else 0
-        # total loss
+
+        # **Weight Adjustments (Optional)**: Increase reconstruction and cycle consistency loss weights
+        recon_x_w = hyperparameters.get('recon_x_w', 10)  # Increase if needed
+        recon_kl_w = hyperparameters.get('recon_kl_w', 0.01)
+        recon_x_cyc_w = hyperparameters.get('recon_x_cyc_w', 10)
+        recon_kl_cyc_w = hyperparameters.get('recon_kl_cyc_w', 0.01)
+        
+        # Total loss
         self.loss_gen_total = hyperparameters['gan_w'] * self.loss_gen_adv_a + \
-                              hyperparameters['gan_w'] * self.loss_gen_adv_b + \
-                              hyperparameters['recon_x_w'] * self.loss_gen_recon_x_a + \
-                              hyperparameters['recon_kl_w'] * self.loss_gen_recon_kl_a + \
-                              hyperparameters['recon_x_w'] * self.loss_gen_recon_x_b + \
-                              hyperparameters['recon_kl_w'] * self.loss_gen_recon_kl_b + \
-                              hyperparameters['recon_x_cyc_w'] * self.loss_gen_cyc_x_a + \
-                              hyperparameters['recon_kl_cyc_w'] * self.loss_gen_recon_kl_cyc_aba + \
-                              hyperparameters['recon_x_cyc_w'] * self.loss_gen_cyc_x_b + \
-                              hyperparameters['recon_kl_cyc_w'] * self.loss_gen_recon_kl_cyc_bab + \
-                              hyperparameters['vgg_w'] * self.loss_gen_vgg_a + \
-                              hyperparameters['vgg_w'] * self.loss_gen_vgg_b
+                            hyperparameters['gan_w'] * self.loss_gen_adv_b + \
+                            recon_x_w * self.loss_gen_recon_x_a + \
+                            recon_kl_w * self.loss_gen_recon_kl_a + \
+                            recon_x_w * self.loss_gen_recon_x_b + \
+                            recon_kl_w * self.loss_gen_recon_kl_b + \
+                            recon_x_cyc_w * self.loss_gen_cyc_x_a + \
+                            recon_kl_cyc_w * self.loss_gen_recon_kl_cyc_aba + \
+                            recon_x_cyc_w * self.loss_gen_cyc_x_b + \
+                            recon_kl_cyc_w * self.loss_gen_recon_kl_cyc_bab + \
+                            hyperparameters['vgg_w'] * self.loss_gen_vgg_a + \
+                            hyperparameters['vgg_w'] * self.loss_gen_vgg_b
+
         self.loss_gen_total.backward()
         self.gen_opt.step()
+
+        # Log individual losses for better monitoring
+        print(f"Gen Reconstruction X A: {self.loss_gen_recon_x_a.item()}, Gen Reconstruction X B: {self.loss_gen_recon_x_b.item()}")
+        print(f"Gen KL Loss A: {self.loss_gen_recon_kl_a.item()}, Gen KL Loss B: {self.loss_gen_recon_kl_b.item()}")
+        print(f"Gen Cyclic X A: {self.loss_gen_cyc_x_a.item()}, Gen Cyclic X B: {self.loss_gen_cyc_x_b.item()}")
+        print(f"Gen Adversarial Loss A: {self.loss_gen_adv_a.item()}, Gen Adversarial Loss B: {self.loss_gen_adv_b.item()}")
+
+
+    # other methods
+
+
 
     def compute_vgg_loss(self, vgg, img, target):
         img_vgg = vgg_preprocess(img)
@@ -316,8 +360,8 @@ class UNIT_Trainer(nn.Module):
         self.eval()
         x_a_recon, x_b_recon, x_ba, x_ab = [], [], [], []
         for i in range(x_a.size(0)):
-            h_a, _ = self.gen_a.encode(x_a[i].unsqueeze(0))
-            h_b, _ = self.gen_b.encode(x_b[i].unsqueeze(0))
+            h_a, _ = self.gen_a.encode(x_a[i].unsqueeze(0).squeeze(1))
+            h_b, _ = self.gen_b.encode(x_b[i].unsqueeze(0).squeeze(1))
             x_a_recon.append(self.gen_a.decode(h_a))
             x_b_recon.append(self.gen_b.decode(h_b))
             x_ba.append(self.gen_a.decode(h_b))
@@ -342,6 +386,10 @@ class UNIT_Trainer(nn.Module):
         self.loss_dis_total = hyperparameters['gan_w'] * self.loss_dis_a + hyperparameters['gan_w'] * self.loss_dis_b
         self.loss_dis_total.backward()
         self.dis_opt.step()
+        
+        # Return total loss
+        return self.loss_dis_total
+
 
     def update_learning_rate(self):
         if self.dis_scheduler is not None:
