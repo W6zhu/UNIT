@@ -21,6 +21,7 @@ import glob
 import torch.nn.functional as F  # Added import for functional operations (for resizing 3D tensors)
 from PIL import Image
 import matplotlib.pyplot as plt
+from torchvision.transforms.functional import resize as F_resize
 
 
 # Methods
@@ -43,21 +44,29 @@ import matplotlib.pyplot as plt
 # weights_init
 
 def collate_resize(batch):
+    """
+    Dynamically resizes both 2D (image) and 3D (NII volume) batches.
+    - For 2D: Resizes using torchvision transforms.
+    - For 3D: Resizes slices using torchvision functional resize.
+    """
     batch_resized = []
     
-    for volume in batch:  # Iterate through each 3D volume in the batch
-        slices = []
-        # Iterate over the depth dimension to get individual 2D slices
-        for i in range(volume.shape[1]):  # Assuming volume shape is (C, D, H, W)
-            slice_2d = volume[:, i, :, :]  # Extract a 2D slice from the volume (C, H, W)
-            resize_transform = transforms.Resize((128, 128))  # Resize the 2D slice
-            slice_resized = resize_transform(slice_2d)
-            slices.append(slice_resized)
-        
-        # Stack all resized slices for the current volume and add to batch
-        batch_resized.extend(slices)  # Flatten to remove the depth dimension
-    
-    # Stack into 4D batch (B, C, H, W) and ensure correct shape for Conv2D
+    for volume in batch:
+        # If it's 4D (C, D, H, W), handle it as a 3D NII volume
+        if len(volume.shape) == 4:  
+            slices = []
+            # Iterate through depth dimension and resize each slice
+            for i in range(volume.shape[1]):
+                slice_2d = volume[:, i, :, :]  # Extract a 2D slice
+                slice_resized = F_resize(slice_2d, (128, 128))  # Resize 2D slice
+                slices.append(slice_resized)
+            # Stack slices back into 3D volume
+            batch_resized.append(torch.stack(slices, dim=1))
+        else:  # Otherwise, treat it as a 2D image and apply a normal resize
+            resize_transform = transforms.Resize((128, 128))
+            batch_resized.append(resize_transform(volume))
+
+    # Return resized batch, ensuring it's in the proper format for further processing
     return torch.stack(batch_resized)
 
 
@@ -71,44 +80,68 @@ def load_nii_volume(file_path):
 
 
 def slice_nii_volume_to_2d(volume):
-    """Slice a 3D NII volume into a list of 2D slices."""
+    """Slice a 3D NII volume into a list of 2D slices with debugging info."""
     slices = []
     for i in range(volume.shape[2]):  # Assuming shape is (H, W, D)
         slice_2d = volume[:, :, i]  # Extract 2D slice along the depth dimension
+        
+        # Debugging: Print min/max values of each slice before processing
+        print(f"Slice {i} min: {slice_2d.min()}, max: {slice_2d.max()}")
+        
+        # Skip slices that are empty or have very low variance
+        if slice_2d.max() - slice_2d.min() < 1e-5:
+            print(f"Skipping slice {i} due to low variance")
+            continue
+        
         slice_2d = torch.unsqueeze(torch.unsqueeze(slice_2d, 0), 0)  # Add batch and channel dimensions
         slices.append(slice_2d)
     return slices
 
 def nii_dataset_loader(data_root, folder_name):
-    """Loads a dataset of NII files, slices them into 2D images."""
+    """
+    Loads NII files from the specified folder, slices them into 2D images.
+    If the folder contains non-NII images (e.g., JPEG), they are loaded as-is.
+    """
     folder_path = os.path.join(data_root, folder_name)
-    nii_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith('.nii') or f.endswith('.nii.gz')]
+    nii_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(('.nii', '.nii.gz'))]
+    image_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(('.jpg', '.png'))]
 
     dataset_slices = []
+    
+    # Handle NII files (3D)
     for nii_file in nii_files:
-        volume = load_nii_volume(nii_file)  # Load the NII file
-        slices = slice_nii_volume_to_2d(volume)  # Convert it to 2D slices
-        dataset_slices.extend(slices)  # Add all 2D slices to the dataset
+        volume = load_nii_volume(nii_file)  # Load NII file as a 3D tensor
+        slices = slice_nii_volume_to_2d(volume)  # Convert to 2D slices
+        dataset_slices.extend(slices)
+
+    # Handle image files (2D)
+    for img_file in image_files:
+        image = Image.open(img_file)  # Load image
+        image_tensor = transforms.ToTensor()(image)  # Convert image to tensor
+        dataset_slices.append(image_tensor)  # Add to dataset
 
     return dataset_slices
 
 def get_all_data_loaders(config):
-    # Check if the data root directory exists
+    """
+    Dynamically loads both 2D and 3D datasets from the specified directories.
+    Uses NII loading for 3D files and standard image loading for 2D files.
+    """
     data_root = config.get("data_root", None)
     if not data_root or not os.path.exists(data_root):
         raise FileNotFoundError(f"The specified data_root path '{data_root}' does not exist. Please check your path.")
 
-    # Paths for the train and test sets
+    # Load both 2D and 3D datasets from train and test folders
     trainA_slices = nii_dataset_loader(data_root, 'trainA')
     trainB_slices = nii_dataset_loader(data_root, 'trainB')
     testA_slices = nii_dataset_loader(data_root, 'testA')
     testB_slices = nii_dataset_loader(data_root, 'testB')
 
     # Create data loaders
-    train_loader_a = torch.utils.data.DataLoader(trainA_slices, batch_size=config['batch_size'], shuffle=True, num_workers=config['num_workers'])
-    test_loader_a = torch.utils.data.DataLoader(testA_slices, batch_size=config['batch_size'], shuffle=False, num_workers=config['num_workers'])
-    train_loader_b = torch.utils.data.DataLoader(trainB_slices, batch_size=config['batch_size'], shuffle=True, num_workers=config['num_workers'])
-    test_loader_b = torch.utils.data.DataLoader(testB_slices, batch_size=config['batch_size'], shuffle=False, num_workers=config['num_workers'])
+    train_loader_a = DataLoader(trainA_slices, batch_size=config['batch_size'], shuffle=True, num_workers=config['num_workers'])
+    test_loader_a = DataLoader(testA_slices, batch_size=config['batch_size'], shuffle=False, num_workers=config['num_workers'])
+    train_loader_b = DataLoader(trainB_slices, batch_size=config['batch_size'], shuffle=True, num_workers=config['num_workers'])
+    test_loader_b = DataLoader(testB_slices, batch_size=config['batch_size'], shuffle=False, num_workers=config['num_workers'])
 
     return train_loader_a, train_loader_b, test_loader_a, test_loader_b
 
@@ -176,6 +209,9 @@ def save_slice(slice_array, file_name, rows, cols):
         if slice_img.ndim == 2:
             pass  # No change needed
 
+        # Normalize slice for visualization
+        slice_img = (slice_img - slice_img.min()) / (slice_img.max() - slice_img.min() + 1e-5)
+        
         axs[i].imshow(slice_img, cmap='gray')
         axs[i].axis('off')
 
@@ -187,10 +223,17 @@ def save_slice(slice_array, file_name, rows, cols):
     plt.savefig(file_name, bbox_inches='tight', pad_inches=0)
     plt.close()
 
+
 def normalize_image(tensor):
     """Normalize a tensor image to [0, 1] range."""
-    tensor = (tensor - tensor.min()) / (tensor.max() - tensor.min() + 1e-5)  # Normalize to [0, 1]
+    min_val = tensor.min()
+    max_val = tensor.max()
+    # If max and min are the same, we avoid division by zero by returning a zero tensor.
+    if max_val == min_val:
+        return torch.zeros_like(tensor)
+    tensor = (tensor - min_val) / (max_val - min_val + 1e-5)  # Normalize to [0, 1]
     return tensor
+
 
 def __write_images(image_outputs, display_image_num, file_name):
     # Log the function call
@@ -226,6 +269,7 @@ def __write_images(image_outputs, display_image_num, file_name):
             print(f"Error while saving image to {file_name}: {e}")
     else:
         print(f"No valid 4D images to save for file {file_name}.")
+
 
 def write_2images(image_outputs, display_image_num, image_directory, postfix):
     n = len(image_outputs)
@@ -298,10 +342,21 @@ def write_html(filename, iterations, image_save_iterations, image_directory, all
 
 
 def write_loss(iterations, trainer, train_writer):
-    members = [attr for attr in dir(trainer) \
-               if not callable(getattr(trainer, attr)) and not attr.startswith("__") and ('loss' in attr or 'grad' in attr or 'nwd' in attr)]
+    members = [attr for attr in dir(trainer)
+               if not callable(getattr(trainer, attr)) and not attr.startswith("__") and
+               ('loss' in attr or 'grad' in attr or 'nwd' in attr)]
+    
     for m in members:
-        train_writer.add_scalar(m, getattr(trainer, m), iterations + 1)
+        value = getattr(trainer, m)
+        
+        # Check if the value is a tensor and extract the scalar value
+        if isinstance(value, torch.Tensor):
+            value = value.item()  # Convert tensor to Python scalar
+        
+        # Log the value if it's a scalar (int or float), skip otherwise
+        if isinstance(value, (int, float)):
+            train_writer.add_scalar(m, value, iterations + 1)
+
 
 
 def slerp(val, low, high):

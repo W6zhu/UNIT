@@ -22,3 +22,5 @@ datasets/anata2fatfrac/
 unit-env/
 *pth
 *t7
+2koutputrun.txt
+.venv/

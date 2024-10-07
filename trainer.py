@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import os
 import torchvision.models as models
+import matplotlib.pyplot as plt
 
 class VGGFeatureExtractor(nn.Module):
     def __init__(self):
@@ -213,6 +214,15 @@ class MUNIT_Trainer(nn.Module):
 
 class UNIT_Trainer(nn.Module):
     def __init__(self, hyperparameters):
+        self.loss_log = {
+            "gen_loss": [],
+            "dis_loss": [],
+            "gen_adv_loss_A": [],
+            "gen_adv_loss_B": [],
+            "gen_recon_x_loss_A": [],
+            "gen_recon_x_loss_B": []
+        }
+
         super(UNIT_Trainer, self).__init__()
         lr = hyperparameters['lr']
         # Initiate the networks
@@ -245,6 +255,7 @@ class UNIT_Trainer(nn.Module):
             self.vgg.eval()
             for param in self.vgg.parameters():
                 param.requires_grad = False
+
 
     def recon_criterion(self, input, target):
         return torch.mean(torch.abs(input - target))
@@ -345,6 +356,74 @@ class UNIT_Trainer(nn.Module):
         print(f"Gen Adversarial Loss A: {self.loss_gen_adv_a.item()}, Gen Adversarial Loss B: {self.loss_gen_adv_b.item()}")
 
 
+        self.loss_log["gen_loss"].append(self.loss_gen_total.item())
+        self.loss_log["dis_loss"].append(self.loss_dis_total.item() if hasattr(self, 'loss_dis_total') else 0)
+        self.loss_log["gen_adv_loss_A"].append(self.loss_gen_adv_a.item())
+        self.loss_log["gen_adv_loss_B"].append(self.loss_gen_adv_b.item())
+        self.loss_log["gen_recon_x_loss_A"].append(self.loss_gen_recon_x_a.item())
+        self.loss_log["gen_recon_x_loss_B"].append(self.loss_gen_recon_x_b.item())
+
+        fig, axs = plt.subplots(3, 2, figsize=(12, 10))  # Create a 3x2 grid of subplots
+
+        # First subplot: Generator Loss
+        axs[0, 0].plot(self.loss_log["gen_loss"], label='Generator Loss', color='blue')
+        axs[0, 0].set_title('Generator Loss')
+        axs[0, 0].set_xlabel('Iterations')
+        axs[0, 0].set_ylabel('Loss')
+        axs[0, 0].legend()
+        axs[0, 0].grid(True)
+
+        # Second subplot: Discriminator Loss
+        axs[0, 1].plot(self.loss_log["dis_loss"], label='Discriminator Loss', color='red')
+        axs[0, 1].set_title('Discriminator Loss')
+        axs[0, 1].set_xlabel('Iterations')
+        axs[0, 1].set_ylabel('Loss')
+        axs[0, 1].legend()
+        axs[0, 1].grid(True)
+
+        # Third subplot: Gen Adv Loss A
+        axs[1, 0].plot(self.loss_log["gen_adv_loss_A"], label='Gen Adv Loss A', color='green')
+        axs[1, 0].set_title('Gen Adv Loss A')
+        axs[1, 0].set_xlabel('Iterations')
+        axs[1, 0].set_ylabel('Loss')
+        axs[1, 0].legend()
+        axs[1, 0].grid(True)
+
+        # Fourth subplot: Gen Adv Loss B
+        axs[1, 1].plot(self.loss_log["gen_adv_loss_B"], label='Gen Adv Loss B', color='orange')
+        axs[1, 1].set_title('Gen Adv Loss B')
+        axs[1, 1].set_xlabel('Iterations')
+        axs[1, 1].set_ylabel('Loss')
+        axs[1, 1].legend()
+        axs[1, 1].grid(True)
+
+        # Fifth subplot: Recon Loss A
+        axs[2, 0].plot(self.loss_log["gen_recon_x_loss_A"], label='Recon Loss A', color='cyan')
+        axs[2, 0].set_title('Recon Loss A')
+        axs[2, 0].set_xlabel('Iterations')
+        axs[2, 0].set_ylabel('Loss')
+        axs[2, 0].legend()
+        axs[2, 0].grid(True)
+
+        # Sixth subplot: Recon Loss B
+        axs[2, 1].plot(self.loss_log["gen_recon_x_loss_B"], label='Recon Loss B', color='magenta')
+        axs[2, 1].set_title('Recon Loss B')
+        axs[2, 1].set_xlabel('Iterations')
+        axs[2, 1].set_ylabel('Loss')
+        axs[2, 1].legend()
+        axs[2, 1].grid(True)
+
+        # Adjust layout so the plots don't overlap
+        plt.tight_layout()
+
+        # Ensure the directory exists
+        save_path = './outputs/unit_anata2fatfrac_folder/losses.png'
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+        # Save the plot
+        plt.savefig(save_path)
+        plt.close()
+
     # other methods
 
 
@@ -427,3 +506,4 @@ class UNIT_Trainer(nn.Module):
         torch.save({'a': self.gen_a.state_dict(), 'b': self.gen_b.state_dict()}, gen_name)
         torch.save({'a': self.dis_a.state_dict(), 'b': self.dis_b.state_dict()}, dis_name)
         torch.save({'gen': self.gen_opt.state_dict(), 'dis': self.dis_opt.state_dict()}, opt_name)
+

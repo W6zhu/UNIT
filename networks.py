@@ -286,27 +286,31 @@ class ResBlock(nn.Module):
         return out
 
 class Conv2dBlock(nn.Module):
-    def __init__(self, input_dim ,output_dim, kernel_size, stride,
-                 padding=0, norm='none', activation='relu', pad_type='zero'):
+    def __init__(self, input_dim ,output_dim, kernel_size, stride, padding=0, norm='none', activation='relu', pad_type='zero'):
         super(Conv2dBlock, self).__init__()
         self.use_bias = True
-        # initialize padding
+
+        # Determine whether to use Conv2d or Conv3d based on the number of dimensions
+        self.is_3d = False  # Flag to track if input is 3D or 2D
+        if isinstance(input_dim, tuple):  # If input_dim is a tuple, it's 3D (NII)
+            self.is_3d = True
+
+        # Padding for both 2D and 3D
         if pad_type == 'reflect':
-            self.pad = nn.ReflectionPad2d(padding)
+            self.pad = nn.ReflectionPad2d(padding) if not self.is_3d else nn.ReflectionPad3d(padding)
         elif pad_type == 'replicate':
-            self.pad = nn.ReplicationPad2d(padding)
+            self.pad = nn.ReplicationPad2d(padding) if not self.is_3d else nn.ReplicationPad3d(padding)
         elif pad_type == 'zero':
-            self.pad = nn.ZeroPad2d(padding)
+            self.pad = nn.ZeroPad2d(padding) if not self.is_3d else nn.ZeroPad3d(padding)
         else:
             assert 0, "Unsupported padding type: {}".format(pad_type)
 
-        # initialize normalization
+        # Initialize normalization layers (InstanceNorm2d/InstanceNorm3d)
         norm_dim = output_dim
         if norm == 'bn':
-            self.norm = nn.BatchNorm2d(norm_dim)
+            self.norm = nn.BatchNorm2d(norm_dim) if not self.is_3d else nn.BatchNorm3d(norm_dim)
         elif norm == 'in':
-            #self.norm = nn.InstanceNorm2d(norm_dim, track_running_stats=True)
-            self.norm = nn.InstanceNorm2d(norm_dim)
+            self.norm = nn.InstanceNorm2d(norm_dim) if not self.is_3d else nn.InstanceNorm3d(norm_dim)
         elif norm == 'ln':
             self.norm = LayerNorm(norm_dim)
         elif norm == 'adain':
@@ -316,7 +320,7 @@ class Conv2dBlock(nn.Module):
         else:
             assert 0, "Unsupported normalization: {}".format(norm)
 
-        # initialize activation
+        # Initialize activation
         if activation == 'relu':
             self.activation = nn.ReLU(inplace=True)
         elif activation == 'lrelu':
@@ -332,16 +336,25 @@ class Conv2dBlock(nn.Module):
         else:
             assert 0, "Unsupported activation: {}".format(activation)
 
-        # initialize convolution
-        self.conv = nn.Conv2d(input_dim, output_dim, kernel_size, stride, bias=self.use_bias)
+        # Initialize convolutional layer (Conv2d/Conv3d)
+        if not self.is_3d:
+            self.conv = nn.Conv2d(input_dim, output_dim, kernel_size, stride, bias=self.use_bias)
+        else:
+            self.conv = nn.Conv3d(input_dim, output_dim, kernel_size, stride, bias=self.use_bias)
 
     def forward(self, x):
-        x = self.conv(self.pad(x))
+        # Handle padding and convolution for both 2D and 3D inputs
+        if not self.is_3d:
+            x = self.conv(self.pad(x))
+        else:
+            x = self.conv(self.pad(x))
+
         if self.norm:
             x = self.norm(x)
         if self.activation:
             x = self.activation(x)
         return x
+
 
     
 class LinearBlock(nn.Module):

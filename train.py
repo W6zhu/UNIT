@@ -36,7 +36,7 @@ def main():
         sys.exit("Only support MUNIT|UNIT")
     trainer.cuda()
 
-    # Load data loaders
+    # # Load data loaders
     train_loader_a, train_loader_b, test_loader_a, test_loader_b = get_all_data_loaders(config)
 
     # Debug: Check dataset size
@@ -48,6 +48,7 @@ def main():
     train_display_images_b = torch.stack([train_loader_b.dataset[i] for i in range(display_size)]).cuda()
     test_display_images_a = torch.stack([test_loader_a.dataset[i] for i in range(display_size)]).cuda()
     test_display_images_b = torch.stack([test_loader_b.dataset[i] for i in range(display_size)]).cuda()
+
 
     # Setup logger and output directories
     model_name = os.path.splitext(os.path.basename(opts.config))[0]
