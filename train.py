@@ -8,6 +8,8 @@ import os
 import sys
 import tensorboardX
 import shutil
+from torch.nn.utils import clip_grad_norm_
+
 
 def main():
     # Argument parsing
@@ -36,7 +38,7 @@ def main():
         sys.exit("Only support MUNIT|UNIT")
     trainer.cuda()
 
-    # # Load data loaders
+    # Load data loaders
     train_loader_a, train_loader_b, test_loader_a, test_loader_b = get_all_data_loaders(config)
 
     # Debug: Check dataset size
@@ -48,7 +50,6 @@ def main():
     train_display_images_b = torch.stack([train_loader_b.dataset[i] for i in range(display_size)]).cuda()
     test_display_images_a = torch.stack([test_loader_a.dataset[i] for i in range(display_size)]).cuda()
     test_display_images_b = torch.stack([test_loader_b.dataset[i] for i in range(display_size)]).cuda()
-
 
     # Setup logger and output directories
     model_name = os.path.splitext(os.path.basename(opts.config))[0]
@@ -68,7 +69,15 @@ def main():
             with Timer("Elapsed time in update: %f"):
                 # Main training code
                 trainer.dis_update(images_a, images_b, config)
+                # Add gradient clipping for discriminator
+                clip_grad_norm_(trainer.dis_a.parameters(), max_norm=1.0)
+                clip_grad_norm_(trainer.dis_b.parameters(), max_norm=1.0)
+
                 trainer.gen_update(images_a, images_b, config)
+                # Add gradient clipping for generator
+                clip_grad_norm_(trainer.gen_a.parameters(), max_norm=1.0)
+                clip_grad_norm_(trainer.gen_b.parameters(), max_norm=1.0)
+
                 torch.cuda.synchronize()
 
             # Log training statistics
@@ -119,4 +128,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

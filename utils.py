@@ -84,10 +84,7 @@ def slice_nii_volume_to_2d(volume):
     slices = []
     for i in range(volume.shape[2]):  # Assuming shape is (H, W, D)
         slice_2d = volume[:, :, i]  # Extract 2D slice along the depth dimension
-        
-        # Debugging: Print min/max values of each slice before processing
-        print(f"Slice {i} min: {slice_2d.min()}, max: {slice_2d.max()}")
-        
+              
         # Skip slices that are empty or have very low variance
         if slice_2d.max() - slice_2d.min() < 1e-5:
             print(f"Skipping slice {i} due to low variance")

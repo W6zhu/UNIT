@@ -298,8 +298,8 @@ class UNIT_Trainer(nn.Module):
         x_bab = self.gen_b.decode(h_b_recon + n_b_recon) if hyperparameters['recon_x_cyc_w'] > 0 else None
 
         # **Normalization Fix**: Clamp reconstructed images to ensure values are within [-1, 1] or [0, 1]
-        x_a_recon = torch.clamp(x_a_recon, min=-1, max=1)
-        x_b_recon = torch.clamp(x_b_recon, min=-1, max=1)
+        x_a_recon = torch.clamp(x_a_recon, min=0, max=1)
+        x_b_recon = torch.clamp(x_b_recon, min=0, max=1)
         x_ba = torch.clamp(x_ba, min=-1, max=1)
         x_ab = torch.clamp(x_ab, min=-1, max=1)
         
@@ -348,6 +348,9 @@ class UNIT_Trainer(nn.Module):
 
         self.loss_gen_total.backward()
         self.gen_opt.step()
+
+        torch.nn.utils.clip_grad_norm_(self.gen_a.parameters(), 1.0)  # Clip gradients to avoid explosion
+        torch.nn.utils.clip_grad_norm_(self.gen_b.parameters(), 1.0)
 
         # Log individual losses for better monitoring
         print(f"Gen Reconstruction X A: {self.loss_gen_recon_x_a.item()}, Gen Reconstruction X B: {self.loss_gen_recon_x_b.item()}")
@@ -465,7 +468,10 @@ class UNIT_Trainer(nn.Module):
         self.loss_dis_total = hyperparameters['gan_w'] * self.loss_dis_a + hyperparameters['gan_w'] * self.loss_dis_b
         self.loss_dis_total.backward()
         self.dis_opt.step()
-        
+            
+        torch.nn.utils.clip_grad_norm_(self.dis_a.parameters(), 0.5)  # Clip gradients to avoid explosion
+        torch.nn.utils.clip_grad_norm_(self.dis_b.parameters(), 0.5)
+
         # Return total loss
         return self.loss_dis_total
 
