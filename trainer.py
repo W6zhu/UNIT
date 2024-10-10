@@ -308,49 +308,93 @@ class UNIT_Trainer(nn.Module):
         if x_bab is not None:
             x_bab = torch.clamp(x_bab, min=-1, max=1)
 
+        # # Reconstruction loss
+        # self.loss_gen_recon_x_a = self.recon_criterion(x_a_recon, x_a)
+        # self.loss_gen_recon_x_b = self.recon_criterion(x_b_recon, x_b)
+        # self.loss_gen_recon_kl_a = self.__compute_kl(h_a)
+        # self.loss_gen_recon_kl_b = self.__compute_kl(h_b)
+        # self.loss_gen_cyc_x_a = self.recon_criterion(x_aba, x_a) if x_aba is not None else 0
+        # self.loss_gen_cyc_x_b = self.recon_criterion(x_bab, x_b) if x_bab is not None else 0
+        # self.loss_gen_recon_kl_cyc_aba = self.__compute_kl(h_a_recon) if h_a_recon is not None else 0
+        # self.loss_gen_recon_kl_cyc_bab = self.__compute_kl(h_b_recon) if h_b_recon is not None else 0
+        
+        # # GAN loss
+        # self.loss_gen_adv_a = self.dis_a.calc_gen_loss(x_ba)
+        # self.loss_gen_adv_b = self.dis_b.calc_gen_loss(x_ab)
+        
+        # # Domain-invariant perceptual loss
+        # self.loss_gen_vgg_a = self.compute_vgg_loss(self.vgg, x_ba, x_b) if hyperparameters['vgg_w'] > 0 else 0
+        # self.loss_gen_vgg_b = self.compute_vgg_loss(self.vgg, x_ab, x_a) if hyperparameters['vgg_w'] > 0 else 0
+
+        # # **Weight Adjustments (Optional)**: Increase reconstruction and cycle consistency loss weights
+        # recon_x_w = hyperparameters.get('recon_x_w', 10)  # Increase if needed
+        # recon_kl_w = hyperparameters.get('recon_kl_w', 0.01)
+        # recon_x_cyc_w = hyperparameters.get('recon_x_cyc_w', 10)
+        # recon_kl_cyc_w = hyperparameters.get('recon_kl_cyc_w', 0.01)
+        
+        # # Total loss
+        # self.loss_gen_total = hyperparameters['gan_w'] * self.loss_gen_adv_a + \
+        #                     hyperparameters['gan_w'] * self.loss_gen_adv_b + \
+        #                     recon_x_w * self.loss_gen_recon_x_a + \
+        #                     recon_kl_w * self.loss_gen_recon_kl_a + \
+        #                     recon_x_w * self.loss_gen_recon_x_b + \
+        #                     recon_kl_w * self.loss_gen_recon_kl_b + \
+        #                     recon_x_cyc_w * self.loss_gen_cyc_x_a + \
+        #                     recon_kl_cyc_w * self.loss_gen_recon_kl_cyc_aba + \
+        #                     recon_x_cyc_w * self.loss_gen_cyc_x_b + \
+        #                     recon_kl_cyc_w * self.loss_gen_recon_kl_cyc_bab + \
+        #                     hyperparameters['vgg_w'] * self.loss_gen_vgg_a + \
+        #                     hyperparameters['vgg_w'] * self.loss_gen_vgg_b
+
+        # self.loss_gen_total.backward()
+
         # Reconstruction loss
         self.loss_gen_recon_x_a = self.recon_criterion(x_a_recon, x_a)
         self.loss_gen_recon_x_b = self.recon_criterion(x_b_recon, x_b)
-        self.loss_gen_recon_kl_a = self.__compute_kl(h_a)
-        self.loss_gen_recon_kl_b = self.__compute_kl(h_b)
+
+        # **KL Annealing**: Gradually increase the weight of the KL loss over iterations
+        kl_anneal_factor = min(1.0, self.gen_scheduler.last_epoch / 1000)
+        self.loss_gen_recon_kl_a = self.__compute_kl(h_a) * kl_anneal_factor
+        self.loss_gen_recon_kl_b = self.__compute_kl(h_b) * kl_anneal_factor
+
+        # Cycle consistency loss
         self.loss_gen_cyc_x_a = self.recon_criterion(x_aba, x_a) if x_aba is not None else 0
         self.loss_gen_cyc_x_b = self.recon_criterion(x_bab, x_b) if x_bab is not None else 0
         self.loss_gen_recon_kl_cyc_aba = self.__compute_kl(h_a_recon) if h_a_recon is not None else 0
         self.loss_gen_recon_kl_cyc_bab = self.__compute_kl(h_b_recon) if h_b_recon is not None else 0
-        
-        # GAN loss
-        self.loss_gen_adv_a = self.dis_a.calc_gen_loss(x_ba)
-        self.loss_gen_adv_b = self.dis_b.calc_gen_loss(x_ab)
-        
-        # Domain-invariant perceptual loss
+
+        # **GAN Loss Weighting**: Dynamically adjust the weight of the GAN loss as training progresses
+        gan_weight = min(hyperparameters['gan_w'] + 0.0001 * self.gen_scheduler.last_epoch, 1.0)
+        self.loss_gen_adv_a = self.dis_a.calc_gen_loss(x_ba) * gan_weight
+        self.loss_gen_adv_b = self.dis_b.calc_gen_loss(x_ab) * gan_weight
+
+        # VGG loss
         self.loss_gen_vgg_a = self.compute_vgg_loss(self.vgg, x_ba, x_b) if hyperparameters['vgg_w'] > 0 else 0
         self.loss_gen_vgg_b = self.compute_vgg_loss(self.vgg, x_ab, x_a) if hyperparameters['vgg_w'] > 0 else 0
 
-        # **Weight Adjustments (Optional)**: Increase reconstruction and cycle consistency loss weights
-        recon_x_w = hyperparameters.get('recon_x_w', 10)  # Increase if needed
-        recon_kl_w = hyperparameters.get('recon_kl_w', 0.01)
-        recon_x_cyc_w = hyperparameters.get('recon_x_cyc_w', 10)
-        recon_kl_cyc_w = hyperparameters.get('recon_kl_cyc_w', 0.01)
-        
+        # **Dynamic Weight Adjustments**: Gradually reduce the reconstruction and cycle consistency loss weights
+        recon_x_w = max(hyperparameters['recon_x_w'] - 0.0001 * self.gen_scheduler.last_epoch, 0.1)
+        recon_x_cyc_w = max(hyperparameters['recon_x_cyc_w'] - 0.0001 * self.gen_scheduler.last_epoch, 0.1)
+
         # Total loss
-        self.loss_gen_total = hyperparameters['gan_w'] * self.loss_gen_adv_a + \
-                            hyperparameters['gan_w'] * self.loss_gen_adv_b + \
-                            recon_x_w * self.loss_gen_recon_x_a + \
-                            recon_kl_w * self.loss_gen_recon_kl_a + \
-                            recon_x_w * self.loss_gen_recon_x_b + \
-                            recon_kl_w * self.loss_gen_recon_kl_b + \
-                            recon_x_cyc_w * self.loss_gen_cyc_x_a + \
-                            recon_kl_cyc_w * self.loss_gen_recon_kl_cyc_aba + \
-                            recon_x_cyc_w * self.loss_gen_cyc_x_b + \
-                            recon_kl_cyc_w * self.loss_gen_recon_kl_cyc_bab + \
-                            hyperparameters['vgg_w'] * self.loss_gen_vgg_a + \
-                            hyperparameters['vgg_w'] * self.loss_gen_vgg_b
+        self.loss_gen_total = gan_weight * (self.loss_gen_adv_a + self.loss_gen_adv_b) + \
+                              recon_x_w * (self.loss_gen_recon_x_a + self.loss_gen_recon_x_b) + \
+                              kl_anneal_factor * (self.loss_gen_recon_kl_a + self.loss_gen_recon_kl_b) + \
+                              recon_x_cyc_w * (self.loss_gen_cyc_x_a + self.loss_gen_cyc_x_b)
 
         self.loss_gen_total.backward()
+
+        # After self.gen_opt.step()
+        torch.nn.utils.clip_grad_norm_(self.gen_a.parameters(), max_norm=5.0)  # Clipping gradient norm to avoid explosion
+        torch.nn.utils.clip_grad_norm_(self.gen_b.parameters(), max_norm=5.0)
+
         self.gen_opt.step()
 
-        torch.nn.utils.clip_grad_norm_(self.gen_a.parameters(), 1.0)  # Clip gradients to avoid explosion
-        torch.nn.utils.clip_grad_norm_(self.gen_b.parameters(), 1.0)
+
+        # Implement learning rate scheduler step
+        if self.gen_scheduler is not None:
+            self.gen_scheduler.step()
+
 
         # Log individual losses for better monitoring
         print(f"Gen Reconstruction X A: {self.loss_gen_recon_x_a.item()}, Gen Reconstruction X B: {self.loss_gen_recon_x_b.item()}")
@@ -467,11 +511,13 @@ class UNIT_Trainer(nn.Module):
         self.loss_dis_b = self.dis_b.calc_dis_loss(x_ab.detach(), x_b)
         self.loss_dis_total = hyperparameters['gan_w'] * self.loss_dis_a + hyperparameters['gan_w'] * self.loss_dis_b
         self.loss_dis_total.backward()
+        
+        # **Gradient Clipping**: Clip gradients to avoid explosion
+        torch.nn.utils.clip_grad_norm_(self.dis_a.parameters(), 0.5)
+        torch.nn.utils.clip_grad_norm_(self.dis_b.parameters(), 0.5)
+        
         self.dis_opt.step()
             
-        torch.nn.utils.clip_grad_norm_(self.dis_a.parameters(), 0.5)  # Clip gradients to avoid explosion
-        torch.nn.utils.clip_grad_norm_(self.dis_b.parameters(), 0.5)
-
         # Return total loss
         return self.loss_dis_total
 
