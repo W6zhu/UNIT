@@ -25,3 +25,5 @@ unit-env/
 2koutputrun.txt
 .venv/
 200outputtest.txt
+30koutputrun.txt
+30kpt2output.txt
